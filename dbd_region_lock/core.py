@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 from . import regions, resolver
 from .firewall import get_firewall
 
@@ -23,3 +27,21 @@ def unlock() -> None:
 
 def status() -> list[str]:
     return get_firewall().blocked_regions()
+
+
+def locked_region(blocked: list[str]) -> str | None:
+    """The one region left unblocked, if the firewall rules pin exactly one."""
+    kept = [r.code for r in regions.REGIONS if r.code not in blocked]
+    return kept[0] if blocked and len(kept) == 1 else None
+
+
+def game_running(exe: str) -> bool:
+    """True if the DBD executable is running (Windows only; False elsewhere)."""
+    if sys.platform != "win32" or not exe:
+        return False
+    name = os.path.basename(exe)
+    result = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+        capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    return name.lower() in result.stdout.lower()

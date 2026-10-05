@@ -20,31 +20,37 @@ region **except** the one you choose and adds firewall rules that block them:
 The app never touches the game process, its memory or its files. It only adds
 firewall rules, which is the same thing as a user editing their own firewall.
 
-## Windows
+## Windows: run it right away
 
-### Run from source
+**Option A: download the .exe (no install).** Open the repository's
+**Releases** page, download `DBDRegionLock.exe` from the `latest` release and
+double-click it. Accept the admin prompt (firewall rules need admin rights).
+Windows SmartScreen may warn because the file is not code-signed: click
+**More info → Run anyway**.
 
-1. Install Python 3.10+ from python.org (tkinter is included).
-2. From this folder: `python -m dbd_region_lock`
-3. Accept the UAC prompt (firewall rules need administrator rights).
+**Option B: run from source.** Install Python 3.10+ from python.org (tick
+"Add python.exe to PATH"), then double-click `Start DBD Region Lock.bat`.
 
-### Build a single .exe
+**Build the .exe yourself:** double-click `build_windows.bat`; the file
+appears in `dist\DBDRegionLock.exe`. GitHub Actions also builds it on every
+push (see `.github/workflows/build.yml`).
 
-Run `build_windows.bat`. It produces `dist\DBDRegionLock.exe`, which asks for
-admin rights when launched.
+![DBD Region Lock](assets/screenshot.png)
 
 ### Using it
 
-1. The game executable is detected automatically for Steam, Epic and the
-   Microsoft Store / Game Pass. If it is not found, click **Browse…** and pick
+1. The **GAME** bar shows the detected executable (Steam, Epic, Microsoft
+   Store / Game Pass). If it says *Not found*, click **Change…** and pick
    `DeadByDaylight-*-Shipping.exe` in `...\DeadByDaylight\Binaries\Win64`
    (or `WinGDK` for the Microsoft Store version).
-2. Pick a region and click **Lock to selected region**.
-3. Restart the game. You can only queue into that region now.
-4. **Unlock (all regions)** removes every rule the app created.
+2. Click a region card. Pings are colour-coded (green < 80 ms, yellow < 150 ms,
+   red above). **Pick best ping** selects the fastest one for you.
+3. Press **LOCK TO …**. The badge top-right turns red and the card shows
+   **● LOCKED**. Restart the game if it was running; the app tells you.
+4. **Unlock all** removes every rule the app created.
 
-The ping column is measured by this app, not by the game, so it still shows
-real latency to blocked regions on Windows.
+The ping on the cards is measured by this app, not the game, so it still shows
+real latency to blocked regions.
 
 ## Linux (Steam Proton)
 
@@ -78,6 +84,15 @@ python -m dbd_region_lock status
   longer in small regions.
 - Locking does not change the region of a lobby you are already in; restart
   the game after locking or unlocking.
+
+## Customizing
+
+- **Regions:** `dbd_region_lock/regions.py` is one list; add, remove or rename
+  entries there and the app and CLI pick them up.
+- **Look:** the colours, ping thresholds and number of card columns are
+  constants at the top of `dbd_region_lock/gui.py`.
+- **Firewall logic:** `dbd_region_lock/firewall/windows.py` (netsh) and
+  `firewall/linux.py` (nftables).
 
 ## Tests
 

@@ -80,3 +80,15 @@ def test_find_shipping_exe(tmp_path: Path):
     exe.parent.mkdir(parents=True)
     exe.touch()
     assert detect.find_shipping_exe(tmp_path) == exe
+
+
+def test_locked_region_is_the_one_left_open():
+    blocked = [r.code for r in regions.others("ap-southeast-2")]
+    assert core.locked_region(blocked) == "ap-southeast-2"
+    assert core.locked_region([]) is None
+    assert core.locked_region(blocked[:3]) is None
+
+
+def test_every_region_has_an_area():
+    assert set(regions.AREAS) == {"Americas", "Europe", "Asia Pacific"}
+    assert all(r.city for r in regions.REGIONS)

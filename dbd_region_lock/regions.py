@@ -14,6 +14,8 @@ from dataclasses import dataclass
 class Region:
     code: str
     name: str
+    area: str  # grouping shown in the app
+    city: str  # short label shown in the app
 
     @property
     def beacon_hosts(self) -> tuple[str, ...]:
@@ -25,24 +27,25 @@ class Region:
 
 
 REGIONS: tuple[Region, ...] = (
-    Region("us-east-1", "US East (N. Virginia)"),
-    Region("us-east-2", "US East (Ohio)"),
-    Region("us-west-1", "US West (N. California)"),
-    Region("us-west-2", "US West (Oregon)"),
-    Region("ca-central-1", "Canada (Central)"),
-    Region("sa-east-1", "South America (Sao Paulo)"),
-    Region("eu-west-1", "Europe (Ireland)"),
-    Region("eu-west-2", "Europe (London)"),
-    Region("eu-central-1", "Europe (Frankfurt)"),
-    Region("ap-south-1", "Asia Pacific (Mumbai)"),
-    Region("ap-east-1", "Asia Pacific (Hong Kong)"),
-    Region("ap-northeast-1", "Asia Pacific (Tokyo)"),
-    Region("ap-northeast-2", "Asia Pacific (Seoul)"),
-    Region("ap-southeast-1", "Asia Pacific (Singapore)"),
-    Region("ap-southeast-2", "Asia Pacific (Sydney)"),
+    Region("us-east-1", "US East (N. Virginia)", "Americas", "N. Virginia"),
+    Region("us-east-2", "US East (Ohio)", "Americas", "Ohio"),
+    Region("us-west-1", "US West (N. California)", "Americas", "N. California"),
+    Region("us-west-2", "US West (Oregon)", "Americas", "Oregon"),
+    Region("ca-central-1", "Canada (Central)", "Americas", "Montreal"),
+    Region("sa-east-1", "South America (Sao Paulo)", "Americas", "Sao Paulo"),
+    Region("eu-west-1", "Europe (Ireland)", "Europe", "Ireland"),
+    Region("eu-west-2", "Europe (London)", "Europe", "London"),
+    Region("eu-central-1", "Europe (Frankfurt)", "Europe", "Frankfurt"),
+    Region("ap-south-1", "Asia Pacific (Mumbai)", "Asia Pacific", "Mumbai"),
+    Region("ap-east-1", "Asia Pacific (Hong Kong)", "Asia Pacific", "Hong Kong"),
+    Region("ap-northeast-1", "Asia Pacific (Tokyo)", "Asia Pacific", "Tokyo"),
+    Region("ap-northeast-2", "Asia Pacific (Seoul)", "Asia Pacific", "Seoul"),
+    Region("ap-southeast-1", "Asia Pacific (Singapore)", "Asia Pacific", "Singapore"),
+    Region("ap-southeast-2", "Asia Pacific (Sydney)", "Asia Pacific", "Sydney"),
 )
 
 BY_CODE: dict[str, Region] = {r.code: r for r in REGIONS}
+AREAS: tuple[str, ...] = tuple(dict.fromkeys(r.area for r in REGIONS))
 
 
 def get(code: str) -> Region:
