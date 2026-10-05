@@ -1,10 +1,11 @@
 import socket
+import struct
 import threading
 from pathlib import Path
 
 import pytest
 
-from dbd_region_lock import core, detect, hostsfile, regions, resolver, state
+from dbd_region_lock import core, detect, diagnose, hostsfile, regions, resolver, state
 from dbd_region_lock.firewall import linux, windows
 
 
@@ -227,3 +228,88 @@ def test_locked_region_is_the_one_left_open():
 def test_every_region_has_an_area():
     assert set(regions.AREAS) == {"Americas", "Europe", "Asia Pacific"}
     assert all(r.city for r in regions.REGIONS)
+
+
+def _dns_response(query: bytes, records: list[tuple[int, bytes]], rcode: int = 0) -> bytes:
+    """A minimal DNS response to `query` carrying (type, rdata) answers, names compressed."""
+    header = query[:2] + struct.pack(">HHHHH", 0x8180 | rcode, 1, len(records), 0, 0)
+    body = query[12:]
+    for rtype, rdata in records:
+        body += b"\xc0\x0c" + struct.pack(">HHIH", rtype, 1, 60, len(rdata)) + rdata
+    return header + body
+
+
+def test_dns_query_and_parse_round_trip():
+    query = resolver.build_query("gamelift-ping.eu-central-1.api.aws", 1)
+    assert b"\x0dgamelift-ping\x0ceu-central-1\x03api\x03aws\x00" in query
+    cname = (5, b"\x03foo\x00")
+    a = (1, socket.inet_pton(socket.AF_INET, "3.122.192.230"))
+    aaaa = (28, socket.inet_pton(socket.AF_INET6, "2a05:d014::1"))
+    assert resolver.parse_response(_dns_response(query, [cname, a, aaaa])) == {"3.122.192.230", "2a05:d014::1"}
+    assert resolver.parse_response(_dns_response(query, [a], rcode=3)) == set()
+
+
+def test_resolve_hosts_unions_partial_answers_and_drops_dead_resolvers(monkeypatch):
+    # Each answer carries one address of a 2-address pool, like the real beacons.
+    pool = ["3.0.0.1", "3.0.0.2"]
+    calls = {"dead": 0}
+
+    def direct(host, server, qtype):
+        if server == resolver.PUBLIC_RESOLVERS[-1]:
+            calls["dead"] += 1
+            return None
+        return {pool[resolver.PUBLIC_RESOLVERS.index(server) % 2]} if qtype == 1 else set()
+
+    monkeypatch.setattr(resolver, "direct_lookup", direct)
+    monkeypatch.setattr(resolver, "system_lookup", lambda h: {"0.0.0.0"})  # DNS-blocker answer, ignored
+    monkeypatch.setattr(resolver, "doh_lookup", lambda h: {pool[1]})
+    monkeypatch.setattr(resolver, "ROUND_DELAY", 0)
+    assert resolver.resolve_hosts(["h"]) == {"h": set(pool)}
+    assert calls["dead"] == 2  # asked in round one only (A + AAAA), then dropped
+
+
+def test_usable_filters_dns_blocker_answers():
+    assert resolver.usable("3.122.192.230") and resolver.usable("2a05:d014::1")
+    assert not any(map(resolver.usable, ["0.0.0.0", "127.0.0.1", "192.168.1.5", "::1", "nonsense"]))
+
+
+def test_all_apps_rule_has_no_program_filter():
+    args = windows.add_rule_args("eu-west-1", "", {"1.2.3.4"})
+    assert not any(a.startswith("program=") for a in args)
+    assert args[-1] == "remoteip=1.2.3.4"
+
+
+def test_dns_check_flags_blocked_and_redirected_regions(monkeypatch):
+    def lookup(host):
+        if "eu-central-1" in host:
+            return {"127.0.0.1"}
+        if "us-east-1" in host:
+            return set()
+        return {"3.3.3.3"}
+
+    monkeypatch.setattr(diagnose.resolver, "system_lookup", lookup)
+    monkeypatch.setattr(diagnose.hostsfile, "hosts_path", lambda: Path("/nonexistent/hosts"))
+    checks = diagnose.dns_checks(kept="us-east-1")
+    text = diagnose.report(checks)
+    assert "Frankfurt" in text and "N. Virginia" in text
+    assert [c.level for c in checks] == [diagnose.FAIL, diagnose.FAIL]
+
+
+def test_live_check_reports_leaking_region(monkeypatch):
+    ips = {r.code: {f"3.0.0.{i}"} for i, r in enumerate(regions.REGIONS)}
+    monkeypatch.setattr(diagnose.resolver, "resolve_regions", lambda rs: ips)
+    leaking = ips["eu-central-1"] | ips["us-east-1"]  # kept region + one leak
+    monkeypatch.setattr(diagnose.resolver, "udp_ping", lambda ip, timeout=0: 20.0 if ip in leaking else None)
+    monkeypatch.setattr(diagnose.resolver, "measure_latency", lambda r: 20.0)
+    saved = state.LockState("us-east-1", "", set().union(*ips.values()))
+    text = diagnose.report(diagnose.lock_checks("us-east-1", saved))
+    assert "Still reachable despite the block: Frankfurt" in text
+    assert "N. Virginia answers (20 ms)" in text
+
+
+def test_udp_ping_survives_missing_ip_family(monkeypatch):
+    def no_socket(*args, **kwargs):
+        raise OSError(97, "Address family not supported by protocol")
+
+    monkeypatch.setattr(resolver.socket, "socket", no_socket)
+    assert resolver.udp_ping("2a05:d014::1") is None

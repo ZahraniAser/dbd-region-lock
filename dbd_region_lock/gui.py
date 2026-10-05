@@ -8,7 +8,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox
 
-from . import __version__, core, detect, regions, resolver
+from . import __version__, core, detect, diagnose, regions, resolver, state
 
 # Colours. Change these to restyle the whole app.
 BG = "#0f1115"
@@ -30,7 +30,7 @@ PING_OK = 150
 CARD_COLUMNS = 3
 TITLE = "DBD Region Lock"
 GAME_CHECK_MS = 3000  # how often to look for a running game
-REFRESH_MS = 60_000  # how often to block beacon IPs that rotated in
+REFRESH_MS = 300_000  # how often to block beacon IPs that changed
 
 
 def ping_colour(ms: float | None) -> str:
@@ -114,7 +114,10 @@ class RegionCard(tk.Frame):
     def set_active(self, on: bool):
         self.badge.config(text="● LOCKED" if on else "")
 
-    def set_ping(self, ms: float | None, pending=False):
+    def set_ping(self, ms: float | None, pending=False, blocked=False):
+        if blocked:
+            self.ping.config(text="BLOCKED", fg=ACCENT)
+            return
         text = "…" if pending else (f"{ms:.0f} ms" if ms is not None else "n/a")
         self.ping.config(text=text, fg=MUTED if pending else ping_colour(ms))
 
@@ -130,6 +133,10 @@ class App:
         self.busy_now = False
         self.pings: dict[str, float | None] = {}
         self.exe = tk.StringVar(value=str(detect.find_dbd_exe() or ""))
+        # Blocking the beacons for every program is the reliable default (and lets the
+        # app verify the block); keep the game-only choice from an earlier lock.
+        saved = state.load()
+        self.all_apps = tk.BooleanVar(value=not (saved and saved.exe))
 
         root.title(f"{TITLE} {__version__}")
         root.configure(bg=BG)
@@ -166,7 +173,7 @@ class App:
         header.columnconfigure(0, weight=1)
         tk.Label(header, text=TITLE.upper(), font=self.fonts.title, bg=BG, fg=TEXT).grid(row=0, column=0, sticky="w")
         tk.Label(
-            header, text="Pick where you play. Every other region is blocked for the game only.",
+            header, text="Pick where you play. Every other region's ping beacon gets firewall-blocked.",
             font=self.fonts.body, bg=BG, fg=MUTED,
         ).grid(row=1, column=0, sticky="w")
         self.pill = tk.Label(header, text="CHECKING…", font=self.fonts.heading, bg=CARD, fg=MUTED, padx=12, pady=6)
@@ -181,6 +188,12 @@ class App:
         self.game_label.grid(row=0, column=1, sticky="ew")
         if sys.platform == "win32":
             make_button(row, "Change…", self.browse, self.fonts).grid(row=0, column=2, sticky="e", padx=(12, 0))
+            tk.Checkbutton(
+                row, text="Block for all apps (recommended: works for every DBD version and can be verified with Check)",
+                variable=self.all_apps, command=self._show_game, font=self.fonts.small, bg=PANEL, fg=TEXT,
+                selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT, highlightthickness=0, bd=0,
+                anchor="w",
+            ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self._show_game()
         return row
 
@@ -209,13 +222,15 @@ class App:
         self.lock_btn = make_button(footer, "LOCK REGION", self.on_lock, self.fonts, primary=True)
         self.unlock_btn = make_button(footer, "Unlock all", self.on_unlock, self.fonts)
         self.best_btn = make_button(footer, "Pick best ping", self.pick_best, self.fonts)
+        self.check_btn = make_button(footer, "Check", self.on_check, self.fonts)
         self.ping_btn = make_button(footer, "Refresh ping", self.refresh_ping, self.fonts)
         self.lock_btn.grid(row=0, column=0, sticky="w")
         self.unlock_btn.grid(row=0, column=1, padx=8)
         self.best_btn.grid(row=0, column=2)
-        self.ping_btn.grid(row=0, column=4, sticky="e")
+        self.check_btn.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        self.ping_btn.grid(row=0, column=5, sticky="e")
         self.status = tk.Label(footer, font=self.fonts.body, bg=BG, fg=MUTED, anchor="w", justify="left", wraplength=680)
-        self.status.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(12, 0))
+        self.status.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(12, 0))
         return footer
 
     # State ---------------------------------------------------------------
@@ -257,6 +272,7 @@ class App:
         for btn in (self.lock_btn, self.unlock_btn):
             btn.config(state="disabled" if changes_blocked else "normal")
         self.best_btn.config(state="disabled" if self.busy_now else "normal")
+        self.check_btn.config(state="disabled" if self.busy_now else "normal")
 
     def background(self, work, done, failed=None):
         """Run `work` off the UI thread, then `done(result)` on it; errors go to `failed` or are shown."""
@@ -284,6 +300,8 @@ class App:
                       else "Close the game, pick a region, press Lock, then launch the game.")
         if self.locked:
             self.select(self.locked)
+        if self.lock_active:
+            self.refresh_ping()  # re-ping now that blocked regions can be labelled as such
 
     def browse(self):
         path = filedialog.askopenfilename(
@@ -301,7 +319,8 @@ class App:
         def ping(region):
             ms = resolver.measure_latency(region)
             self.pings[region.code] = ms
-            self.root.after(0, self.cards[region.code].set_ping, ms)
+            blocked = ms is None and self.lock_active and self.locked not in (None, region.code)
+            self.root.after(0, lambda: self.cards[region.code].set_ping(ms, blocked=blocked))
 
         for region in regions.REGIONS:
             threading.Thread(target=ping, args=(region,), daemon=True).start()
@@ -332,7 +351,7 @@ class App:
         self.background(detect.game_running, done, failed)
 
     def refresh_lock(self):
-        """Every minute, block beacon IPs that rotated in (never while the game runs)."""
+        """Every few minutes, block beacon IPs that changed (never while the game runs)."""
 
         def done(added: int):
             if added:
@@ -351,18 +370,19 @@ class App:
         if not self.selected:
             self.status.config(text="Click a region card first.", fg=OK)
             return
-        exe = self.exe.get().strip()
-        if sys.platform == "win32" and not exe:
-            self.status.config(text="Choose the game executable first (Change…).", fg=OK)
+        exe = "" if self.all_apps.get() else self.exe.get().strip()
+        if sys.platform == "win32" and not self.all_apps.get() and not exe:
+            self.status.config(text="Choose the game executable first (Change…), or tick 'Block for all apps'.", fg=OK)
             return
         code = self.selected
-        self.set_busy(True, f"Locking to {regions.get(code).name}…")
+        self.set_busy(True, f"Locking to {regions.get(code).name}: finding every beacon address (can take up to 30 s)…")
 
         def done(notes):
             self.locked, self.lock_active = code, True
             self._show_lock()
             lines = [f"Locked to {regions.get(code).name}. Launch the game; you will only match in this region."]
             self.set_busy(False, "\n".join(lines + notes), GOOD)
+            self.refresh_ping()
 
         self.background(lambda: core.lock(code, exe), done)
 
@@ -373,8 +393,49 @@ class App:
             self.locked, self.lock_active = None, False
             self._show_lock()
             self.set_busy(False, "\n".join(["Unlocked. The game can use every region again."] + notes), GOOD)
+            self.refresh_ping()
 
         self.background(core.unlock, done)
+
+    def on_check(self):
+        self.set_busy(True, "Checking firewall, DNS and the block itself (about 30 s)…")
+
+        def done(checks):
+            self.set_busy(False, "Check finished.")
+            CheckDialog(self.root, checks, self.fonts)
+
+        self.background(diagnose.run, done)
+
+
+class CheckDialog(tk.Toplevel):
+    """Results of the self-check, colour-coded, with a button to copy them."""
+
+    COLOURS = {diagnose.OK: GOOD, diagnose.WARN: OK, diagnose.FAIL: BAD, diagnose.INFO: MUTED}
+
+    def __init__(self, master, checks: list[diagnose.Check], fonts: Fonts):
+        super().__init__(master, bg=BG, padx=18, pady=16)
+        self.title(f"{TITLE}: check")
+        self.report = diagnose.report(checks)
+        failed = sum(c.level == diagnose.FAIL for c in checks)
+        summary = f"{failed} problem(s) found." if failed else "No problems found."
+        tk.Label(self, text=summary, font=fonts.card_title, bg=BG, fg=BAD if failed else GOOD).pack(anchor="w")
+        text = tk.Text(self, width=86, height=min(22, 3 + 2 * len(checks)), wrap="word", bg=PANEL, fg=TEXT,
+                       font=fonts.body, relief="flat", padx=10, pady=8, highlightthickness=0)
+        for level, colour in self.COLOURS.items():
+            text.tag_configure(level, foreground=colour)
+        for check in checks:
+            text.insert("end", diagnose.SYMBOLS[check.level] + " ", check.level)
+            text.insert("end", check.text + "\n\n")
+        text.config(state="disabled")
+        text.pack(fill="both", expand=True, pady=(10, 12))
+        buttons = tk.Frame(self, bg=BG)
+        buttons.pack(fill="x")
+        make_button(buttons, "Copy report", self.copy, fonts).pack(side="left")
+        make_button(buttons, "Close", self.destroy, fonts).pack(side="right")
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(f"{TITLE} {__version__} check\n{self.report}")
 
 
 def icon_path() -> Path:

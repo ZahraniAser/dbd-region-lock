@@ -18,7 +18,7 @@ region **except** the one you choose and adds firewall rules that block them:
 
 | Platform | Mechanism | Scope |
 | --- | --- | --- |
-| Windows | Windows Defender Firewall outbound rules, one per blocked region, named `DBD Region Lock - <region>` | Only the DBD executable (`program=`). Rules persist across reboots. |
+| Windows | Windows Defender Firewall outbound rules, one per blocked region, named `DBD Region Lock - <region>` | All apps by default (beacon IPs serve nothing but GameLift pings), or only the DBD executable if you untick **Block for all apps**. Rules persist across reboots. |
 | Linux / Proton | An nftables table `inet dbd_region_lock` | System-wide, but only for GameLift beacon IPs, which serve nothing else. Cleared on reboot. |
 
 The app never touches the game process, its memory or its files. It only adds
@@ -29,14 +29,25 @@ Safeguards:
 - **Game must be closed.** Lock and Unlock are disabled while any DBD build
   (Steam, Epic, Microsoft Store, or Proton) is running, and a yellow banner
   says so.
-- **Auto-refresh.** Beacon addresses rotate. While the app is open and the game
-  is closed, it re-checks every 60 seconds and blocks any new addresses. It
+- **Complete address lists.** Each beacon has a small pool of addresses
+  (2 IPv4 + 2 IPv6), but any one DNS answer contains only one of each, and
+  your PC's DNS cache keeps repeating it. The app asks several public
+  resolvers (Google, Cloudflare, Quad9, OpenDNS, plus encrypted DNS) over a
+  few rounds until the pool stops growing, so no address is left open. Answers
+  pointing at fake/local addresses (DNS blockers) are ignored.
+- **Auto-refresh.** While the app is open and the game is closed, it re-checks
+  every 5 minutes and blocks any new addresses. It
   only ever adds rules, so the lock is never lifted. (On Linux this runs only
   when the app runs as root, to avoid repeated password prompts.)
 - **Hosts-file cleanup.** Old hosts-file region changers leave `gamelift`
   entries in `C:\Windows\System32\drivers\etc\hosts` that fight the lock.
   Lock and Unlock remove them (a backup is saved as
   `hosts.dbd-region-lock.bak`) and flush the DNS cache.
+- **Check button.** Tests the things that make a lock fail: Windows Firewall
+  turned off, a third-party firewall (Norton, Bitdefender…) taking over,
+  missing addresses, DNS blockers such as Acrylic DNS Proxy, leftover hosts
+  entries, and a live test that every other region is really unreachable.
+  **Copy report** puts the result on the clipboard.
 - **Real ping.** Latency is measured the way the game does it: a UDP echo to
   each beacon on port 7770. If your network drops that, it falls back to a TCP
   handshake so you still see a number.
@@ -66,12 +77,17 @@ push (see `.github/workflows/build.yml`).
    (or `WinGDK` for the Microsoft Store version).
 2. Click a region card. Pings are colour-coded (green < 80 ms, yellow < 150 ms,
    red above). **Pick best ping** selects the fastest one for you.
-3. Press **LOCK TO …**. The badge top-right turns red and the card shows
-   **● LOCKED**. Restart the game if it was running; the app tells you.
-4. **Unlock all** removes every rule the app created.
+3. Keep **Block for all apps** ticked (recommended). Press **LOCK TO …**;
+   finding every beacon address takes up to ~30 s. The badge top-right turns
+   red, the chosen card shows **● LOCKED** and every other card shows
+   **BLOCKED**. If any other card still shows a ping, the block is not
+   working: press **Check**.
+4. Launch the game.
+5. **Unlock all** removes every rule the app created.
 
-The ping on the cards is measured by this app, not the game, so it still shows
-real latency to blocked regions.
+If you untick **Block for all apps**, the rules only apply to the game's .exe;
+the cards then keep showing real pings and the lock can't be verified from the
+app. That mode does not work for the Microsoft Store / Xbox version.
 
 ## Linux (Steam Proton)
 

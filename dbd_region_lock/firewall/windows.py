@@ -1,7 +1,8 @@
 """Windows Defender Firewall backend (netsh advfirewall).
 
-One outbound block rule per blocked region, scoped with program= to the DBD
-executable, so nothing else on the machine is affected. Rules persist across
+One outbound block rule per blocked region. By default the rules cover every
+program (the beacon IPs serve nothing but GameLift latency pings); optionally
+they are scoped with program= to the DBD executable only. Rules persist across
 reboots until removed.
 """
 
@@ -21,7 +22,8 @@ def rule_name(region_code: str) -> str:
 
 
 def add_rule_args(region_code: str, exe: str, ips: set[str]) -> list[str]:
-    return [
+    """netsh arguments for one block rule. An empty `exe` blocks these IPs for every program."""
+    args = [
         "netsh", "advfirewall", "firewall", "add", "rule",
         f"name={rule_name(region_code)}",
         "dir=out",
@@ -29,9 +31,11 @@ def add_rule_args(region_code: str, exe: str, ips: set[str]) -> list[str]:
         "enable=yes",
         "profile=any",
         "protocol=any",
-        f"program={exe}",
         f"remoteip={','.join(sorted(ips))}",
     ]
+    if exe:
+        args.insert(-1, f"program={exe}")
+    return args
 
 
 def delete_rule_args(region_code: str) -> list[str]:
