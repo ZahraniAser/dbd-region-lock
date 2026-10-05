@@ -1,8 +1,8 @@
-"""Strip GameLift redirects other region tools leave in the hosts file.
+"""GameLift entries in the hosts file.
 
-Hosts-file region changers point gamelift hostnames at one region's IP. Left
-behind, those entries fight the firewall lock (the game would ping the wrong
-address), so they are removed on lock and unlock.
+Other region tools leave gamelift redirects behind that fight the lock, so
+they are removed on lock and unlock. Steer mode writes its own redirects,
+inside a marked block, so they can always be found and removed again.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from pathlib import Path
 
 GAMELIFT_HOST = re.compile(r"^gamelift(-ping)?\.[a-z0-9-]+\.(amazonaws\.com|api\.aws)\.?$", re.IGNORECASE)
 BACKUP_SUFFIX = ".dbd-region-lock.bak"
+BLOCK_START = "# BEGIN DBD Region Lock (managed, removed on Unlock)"
+BLOCK_END = "# END DBD Region Lock"
 
 
 def hosts_path() -> Path:
@@ -32,6 +34,8 @@ def strip_gamelift(text: str) -> tuple[str, int]:
     """
     out, removed = [], 0
     for line in text.splitlines(keepends=True):
+        if line.strip() in (BLOCK_START, BLOCK_END):
+            continue
         body, hash_, comment = line.partition("#")
         tokens = body.split()
         if len(tokens) < 2:
@@ -66,6 +70,35 @@ def clean(path: Path | None = None) -> int:
         return 0
     shutil.copyfile(path, path.with_name(path.name + BACKUP_SUFFIX))
     path.write_text(cleaned, encoding="utf-8", errors="surrogateescape")
+    flush_dns()
+    return removed
+
+
+def has_managed(path: Path | None = None) -> bool:
+    try:
+        return BLOCK_START in (path or hosts_path()).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def write_managed(entries: list[tuple[str, str]], path: Path | None = None) -> None:
+    """Replace every GameLift entry with `entries` ((ip, hostname) pairs) in a marked block."""
+    path = path or hosts_path()
+    try:
+        original = path.read_text(encoding="utf-8", errors="surrogateescape")
+    except FileNotFoundError:
+        original = ""
+    cleaned, _ = strip_gamelift(original)
+    if cleaned and not cleaned.endswith("\n"):
+        cleaned += "\n"
+    block = [BLOCK_START, *(f"{ip} {host}" for ip, host in entries), BLOCK_END]
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    if original and not backup.exists():
+        backup.write_text(original, encoding="utf-8", errors="surrogateescape")
+    path.write_text(cleaned + "\n".join(block) + "\n", encoding="utf-8", errors="surrogateescape")
+    flush_dns()
+
+
+def flush_dns() -> None:
     if sys.platform == "win32":
         subprocess.run(["ipconfig", "/flushdns"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-    return removed

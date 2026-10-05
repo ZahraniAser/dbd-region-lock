@@ -21,7 +21,18 @@ region **except** the one you choose and adds firewall rules that block them:
 | Windows | Windows Defender Firewall outbound rules, one per blocked region, named `DBD Region Lock - <region>` | All apps by default (beacon IPs serve nothing but GameLift pings), or only the DBD executable if you untick **Block for all apps**. Rules persist across reboots. |
 | Linux / Proton | An nftables table `inet dbd_region_lock` | System-wide, but only for GameLift beacon IPs, which serve nothing else. Cleared on reboot. |
 
-**Strict mode (Windows, on by default when the game is found).** Blocking the
+**Steer mode (experimental).** Some players, especially far from every
+region (e.g. the Middle East), still land in their default region even when
+Block verifiably works, because matchmaking may fall back to a default region
+when the other regions report no latency at all. Steer doesn't block anything:
+it points every other region's beacon names (in a marked block of the hosts
+file) at the beacon of the most distant region that answers, e.g. Sao Paulo.
+The game then measures a complete set in which your region is clearly the
+best (e.g. Ireland 91 ms, everything else ~300 ms). Unlock removes the entries.
+If matchmaking ignores pings for your location entirely, no PC-side tool can
+change it.
+
+**Strict mode (Windows, off by default).** Blocking the
 beacons isn't always enough: the game can still reach other regions by other
 routes. Strict also blocks every Amazon address range of the other regions
 (from AWS's published `ip-ranges.json`, about 3,300 ranges) for the game's
@@ -88,7 +99,9 @@ push (see `.github/workflows/build.yml`).
    (or `WinGDK` for the Microsoft Store version).
 2. Click a region card. Pings are colour-coded (green < 80 ms, yellow < 150 ms,
    red above). **Pick best ping** selects the fastest one for you.
-3. Keep **Block for all apps** and **Strict** ticked (recommended). Press **LOCK TO …**;
+3. Choose a **Method**: **Block** (keep **Block for all apps** ticked), or
+   **Steer** if Block still puts you in your default region. Tick **Strict**
+   only to test; it turns wrong-region matches into "connection lost". Press **LOCK TO …**;
    finding every beacon address takes up to ~30 s. The badge top-right turns
    red, the chosen card shows **● LOCKED** and every other card shows
    **BLOCKED**. If any other card still shows a ping, the block is not

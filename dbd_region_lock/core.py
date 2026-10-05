@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from . import awsranges, detect, hostsfile, regions, resolver, state
+from . import awsranges, detect, hostsfile, regions, resolver, state, steer
 from .firewall import get_firewall
 
 
@@ -25,13 +25,18 @@ def _require_game_closed() -> None:
 
 
 def _clean_hosts() -> list[str]:
+    own = hostsfile.has_managed()  # Steer mode's entries rather than another tool's
     try:
         removed = hostsfile.clean()
     except OSError:
         # Not writable (no root on Linux, or antivirus / Controlled Folder Access on Windows).
         return [f"Your hosts file ({hostsfile.hosts_path()}) has GameLift entries from another tool "
                 "that could not be removed automatically. Remove them, or they will interfere with the lock."]
-    return [f"Removed {removed} leftover GameLift entries from your hosts file (backup saved)."] if removed else []
+    if not removed:
+        return []
+    if own:
+        return ["Steering entries removed from the hosts file."]
+    return [f"Removed {removed} leftover GameLift entries from your hosts file (backup saved)."]
 
 
 def _block_lists(region_code: str) -> dict[str, set[str]]:
@@ -68,6 +73,18 @@ def _lock(region_code: str, exe: str, strict_exe: str = "") -> list[str]:
     return notes
 
 
+def _steer(region_code: str) -> list[str]:
+    """Point every other region's beacons at a distant decoy region (no firewall rules)."""
+    _require_game_closed()
+    plan = steer.plan(region_code)
+    get_firewall().remove()  # blocking would hide the decoy pings again
+    hostsfile.write_managed(plan.entries)
+    state.save(state.LockState(region_code, mode="steer", decoy=plan.decoy))
+    decoy = regions.get(plan.decoy).city
+    return [f"Steered: every other region now pings like {decoy} ({plan.decoy_ms:.0f} ms) from here, "
+            f"so {regions.get(region_code).city} ({plan.kept_ms:.0f} ms) is clearly the best."] + plan.warnings
+
+
 def _unlock() -> list[str]:
     _require_game_closed()
     notes = _clean_hosts()
@@ -84,7 +101,7 @@ def _refresh() -> int:
     """
     current = state.load()
     firewall = get_firewall()
-    if not current or not firewall.can_refresh() or detect.game_running():
+    if not current or current.mode != "block" or not firewall.can_refresh() or detect.game_running():
         return 0
     fresh = {code: ips - current.blocked_ips for code, ips in _block_lists(current.region).items()}
     added = sum(len(ips) for ips in fresh.values())
@@ -97,10 +114,12 @@ def _refresh() -> int:
 
 def status() -> tuple[bool, str | None]:
     """(lock active, locked region code if known)."""
+    saved = state.load()
+    if saved and saved.mode == "steer":
+        return (True, saved.region) if hostsfile.has_managed() else (False, None)
     blocked = get_firewall().blocked_regions()
     if not blocked:
         return False, None
-    saved = state.load()
     return True, locked_region(blocked) or (saved.region if saved else None)
 
 
@@ -110,8 +129,10 @@ def locked_region(blocked: list[str]) -> str | None:
     return kept[0] if blocked and len(kept) == 1 else None
 
 
-def lock(region_code: str, exe: str, strict_exe: str = "") -> list[str]:
+def lock(region_code: str, exe: str, strict_exe: str = "", mode: str = "block") -> list[str]:
     with _firewall_lock:
+        if mode == "steer":
+            return _steer(region_code)
         return _lock(region_code, exe, strict_exe)
 
 

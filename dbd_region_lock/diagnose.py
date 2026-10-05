@@ -93,7 +93,7 @@ def dns_checks(kept: str | None) -> list[Check]:
         checks.append(Check(OK, "DNS resolves every region's beacon normally."))
     try:
         cleaned, removed = hostsfile.strip_gamelift(hostsfile.hosts_path().read_text(encoding="utf-8", errors="ignore"))
-        if removed:
+        if removed and not hostsfile.has_managed():  # Steer mode's own entries are expected
             checks.append(Check(WARN, f"Your hosts file has {removed} GameLift entries. Press Lock again to remove them."))
     except OSError:
         pass
@@ -153,6 +153,41 @@ def lock_checks(kept: str, saved: state.LockState | None) -> list[Check]:
     return checks
 
 
+def steer_checks(kept: str, saved: state.LockState) -> list[Check]:
+    checks = []
+    decoy = regions.get(saved.decoy)
+    decoy_ips = resolver.resolve_hosts(list(decoy.beacon_hosts))
+    decoy_all = set().union(*decoy_ips.values())
+    checks.append(Check(INFO, f"Steer mode: every other region is pointed at {decoy.city}'s beacon so it looks far away."))
+
+    not_steered = []
+    for region in regions.REGIONS:
+        if region.code in (kept, decoy.code):
+            continue
+        answer = {ip for ip in resolver.system_lookup(region.beacon_hosts[1]) if ":" not in ip}
+        if not answer or not answer <= decoy_all:
+            not_steered.append(region.city)
+    if not_steered:
+        checks.append(Check(FAIL, f"Not steered on this PC: {', '.join(not_steered)}. Something overrides the hosts "
+                                  "file (a DNS tool or VPN). Press Lock again, or undo that tool."))
+    else:
+        checks.append(Check(OK, f"Every other region resolves to {decoy.city} on this PC."))
+
+    decoy_ms = min((ms for ip in decoy_ips[decoy.beacon_hosts[1]] if ":" not in ip
+                    for ms in [resolver.udp_ping(ip, timeout=1.5)] if ms is not None), default=None)
+    kept_ms = resolver.measure_latency(regions.get(kept))
+    if decoy_ms is None:
+        checks.append(Check(FAIL, f"{decoy.city}'s beacon stopped answering, so the other regions would look "
+                                  "unreachable again. Close the game and press Lock again."))
+    elif kept_ms is not None and decoy_ms - kept_ms < 50:
+        checks.append(Check(WARN, f"{regions.get(kept).city} ({kept_ms:.0f} ms) isn't much faster than the "
+                                  f"steered regions ({decoy_ms:.0f} ms), so it may not stand out."))
+    else:
+        detail = f" ({kept_ms:.0f} ms vs {decoy_ms:.0f} ms for every other region)" if kept_ms else ""
+        checks.append(Check(OK, f"{regions.get(kept).city} is clearly the best region the game can measure{detail}."))
+    return checks
+
+
 def _safe(name: str, fn, *args) -> list[Check]:
     """Run one group of checks; a crash in it becomes a line in the report instead of ending the check."""
     try:
@@ -177,8 +212,12 @@ def run() -> list[Check]:
     elif not kept:
         checks.append(Check(WARN, "A lock is active but the chosen region is unknown. Press Lock again."))
     else:
-        checks.append(Check(OK, f"Lock is active: only {regions.get(kept).name} is allowed."))
-        checks += _safe("block", lock_checks, kept, saved)
+        if saved and saved.mode == "steer" and saved.decoy:
+            checks.append(Check(OK, f"Lock is active (Steer): {regions.get(kept).name} should be the best region."))
+            checks += _safe("steer", steer_checks, kept, saved)
+        else:
+            checks.append(Check(OK, f"Lock is active: only {regions.get(kept).name} is allowed."))
+            checks += _safe("block", lock_checks, kept, saved)
     return checks
 
 

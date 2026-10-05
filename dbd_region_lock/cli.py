@@ -18,6 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     lock_p.add_argument("region", choices=list(regions.BY_CODE))
     lock_p.add_argument("--exe", help="path to the DBD shipping executable (auto-detected on Windows)")
     lock_p.add_argument("--game-only", action="store_true", help="apply the beacon block to the game only, not all apps")
+    lock_p.add_argument("--steer", action="store_true",
+                        help="make other regions look far away (hosts redirects to a distant region) instead of blocking")
     lock_p.add_argument("--strict", action="store_true",
                         help="Windows: also block every other region's Amazon address ranges for the game")
     sub.add_parser("unlock", help="remove the lock")
@@ -44,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
                 print("Could not find Dead by Daylight. Pass --exe <path to DeadByDaylight-*-Shipping.exe>.")
                 return 1
             beacon_exe = exe if args.game_only else ""
-            for note in core.lock(args.region, beacon_exe, exe if args.strict else ""):
+            mode = "steer" if args.steer else "block"
+            for note in core.lock(args.region, beacon_exe, exe if args.strict else "", mode):
                 print(note)
             print(f"Locked to {args.region}. Launch the game now.")
             return 0

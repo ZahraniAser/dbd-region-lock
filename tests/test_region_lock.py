@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dbd_region_lock import awsranges, core, detect, diagnose, hostsfile, regions, resolver, state
+from dbd_region_lock import awsranges, core, detect, diagnose, hostsfile, regions, resolver, state, steer
 from dbd_region_lock.firewall import linux, windows
 
 
@@ -75,6 +75,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "get_firewall", lambda: fw)
     monkeypatch.setattr(core.detect, "game_running", lambda: False)
     monkeypatch.setattr(core.hostsfile, "clean", lambda: 0)
+    monkeypatch.setattr(core.hostsfile, "has_managed", lambda: False)
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(state, "state_path", lambda: state_file)
     return fw
@@ -370,3 +371,75 @@ def test_windows_rules_split_large_range_lists(monkeypatch):
     windows.WindowsFirewall().add_ranges("C:\\\\dbd.exe", {"eu-central-1": [f"3.{i // 256}.{i % 256}.0/24" for i in range(450)]})
     assert len(calls) == 3  # 200 + 200 + 50
     assert all("program=C:\\\\dbd.exe" in c for c in calls)
+
+
+def test_steer_entries_skip_kept_and_decoy():
+    entries = steer.entries_for("eu-west-1", "ap-southeast-2", ["3.3.3.3"], ["4.4.4.4"])
+    hosts = {h for _, h in entries}
+    assert "gamelift-ping.eu-west-1.api.aws" not in hosts and "gamelift-ping.ap-southeast-2.api.aws" not in hosts
+    assert ("3.3.3.3", "gamelift-ping.eu-central-1.api.aws") in entries
+    assert ("4.4.4.4", "gamelift.eu-central-1.amazonaws.com") in entries
+    assert len(entries) == 2 * (len(regions.REGIONS) - 2)
+
+
+def _fake_network(monkeypatch, latency):
+    """Each region's beacon at 10.0.<i>.1 (+ endpoint 10.1.<i>.1) answering with `latency[code]` ms."""
+    index = {r.code: i for i, r in enumerate(regions.REGIONS)}
+
+    def resolve(hosts, **_):
+        out = {}
+        for h in hosts:
+            code = h.split(".")[1]
+            out[h] = {f"10.0.{index[code]}.1"} if h.startswith("gamelift-ping") else {f"10.1.{index[code]}.1"}
+        return out
+
+    by_ip = {f"10.0.{i}.1": latency.get(code) for code, i in index.items()}
+    monkeypatch.setattr(steer.resolver, "resolve_hosts", resolve)
+    monkeypatch.setattr(steer.resolver, "udp_ping", lambda ip, **_: by_ip.get(ip))
+
+
+def test_steer_picks_slowest_answering_region(monkeypatch):
+    _fake_network(monkeypatch, {"eu-west-1": 91.0, "eu-central-1": 80.0, "sa-east-1": 310.0, "ap-southeast-2": None})
+    plan = steer.plan("eu-west-1")
+    assert plan.decoy == "sa-east-1"  # Sydney is farther but doesn't answer
+    assert plan.ping_ips == [f"10.0.{[r.code for r in regions.REGIONS].index('sa-east-1')}.1"]
+    assert not plan.warnings
+
+
+def test_steer_refuses_when_kept_region_does_not_answer(monkeypatch):
+    _fake_network(monkeypatch, {"eu-central-1": 80.0})
+    with pytest.raises(RuntimeError, match="does not answer"):
+        steer.plan("eu-west-1")
+
+
+def test_steer_warns_when_no_region_is_much_slower(monkeypatch):
+    _fake_network(monkeypatch, {"eu-west-1": 91.0, "eu-central-1": 100.0})
+    assert steer.plan("eu-west-1").warnings
+
+
+def test_managed_hosts_block_round_trip(tmp_path):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n9.9.9.9 gamelift-ping.us-east-1.api.aws\n")
+    hostsfile.write_managed([("3.3.3.3", "gamelift-ping.eu-central-1.api.aws")], hosts)
+    text = hosts.read_text()
+    assert hostsfile.has_managed(hosts)
+    assert "9.9.9.9" not in text and "3.3.3.3 gamelift-ping.eu-central-1.api.aws" in text
+    assert text.startswith("127.0.0.1 localhost\n")
+    assert hostsfile.clean(hosts) == 1
+    assert hosts.read_text() == "127.0.0.1 localhost\n" and not hostsfile.has_managed(hosts)
+
+
+def test_steer_lock_clears_firewall_and_writes_hosts(monkeypatch, env):
+    written = {}
+    fake_plan = steer.Plan("eu-west-1", "sa-east-1", 91.0, 310.0, ["3.3.3.3"], ["4.4.4.4"],
+                           [("3.3.3.3", "gamelift-ping.eu-central-1.api.aws")], [])
+    monkeypatch.setattr(core.steer, "plan", lambda kept: fake_plan)
+    monkeypatch.setattr(core.hostsfile, "write_managed", lambda entries: written.update(entries=entries))
+    notes = core.lock("eu-west-1", "", mode="steer")
+    assert env.removed and written["entries"] == fake_plan.entries
+    saved = state.load()
+    assert (saved.mode, saved.region, saved.decoy) == ("steer", "eu-west-1", "sa-east-1")
+    assert "Sao Paulo" in notes[0]
+    monkeypatch.setattr(core.hostsfile, "has_managed", lambda: True)
+    assert core.status() == (True, "eu-west-1")
+    assert core.refresh() == 0  # beacon refresh is for Block mode only

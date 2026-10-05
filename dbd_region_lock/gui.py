@@ -137,8 +137,9 @@ class App:
         # app verify the block); keep the game-only choice from an earlier lock.
         saved = state.load()
         self.all_apps = tk.BooleanVar(value=not (saved and saved.exe))
-        # Strict blocks whole regions for the game; on by default whenever the game was found.
-        self.strict = tk.BooleanVar(value=bool(saved.strict_exe) if saved else bool(self.exe.get()))
+        # Strict can turn a wrong-region match into "connection lost", so it is opt-in.
+        self.strict = tk.BooleanVar(value=bool(saved and saved.strict_exe))
+        self.mode = tk.StringVar(value=saved.mode if saved else "block")
 
         root.title(f"{TITLE} {__version__}")
         root.configure(bg=BG)
@@ -175,7 +176,7 @@ class App:
         header.columnconfigure(0, weight=1)
         tk.Label(header, text=TITLE.upper(), font=self.fonts.title, bg=BG, fg=TEXT).grid(row=0, column=0, sticky="w")
         tk.Label(
-            header, text="Pick where you play. Every other region's ping beacon gets firewall-blocked.",
+            header, text="Pick where you play. Other regions get blocked, or steered to look far away.",
             font=self.fonts.body, bg=BG, fg=MUTED,
         ).grid(row=1, column=0, sticky="w")
         self.pill = tk.Label(header, text="CHECKING…", font=self.fonts.heading, bg=CARD, fg=MUTED, padx=12, pady=6)
@@ -190,20 +191,33 @@ class App:
         self.game_label.grid(row=0, column=1, sticky="ew")
         if sys.platform == "win32":
             make_button(row, "Change…", self.browse, self.fonts).grid(row=0, column=2, sticky="e", padx=(12, 0))
-            tk.Checkbutton(
-                row, text="Block for all apps (recommended: works for every DBD version and can be verified with Check)",
-                variable=self.all_apps, command=self._show_game, font=self.fonts.small, bg=PANEL, fg=TEXT,
-                selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT, highlightthickness=0, bd=0,
-                anchor="w",
-            ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
-            tk.Checkbutton(
-                row, text="Strict: also block every other region's Amazon servers for the game (needs the game path)",
-                variable=self.strict, font=self.fonts.small, bg=PANEL, fg=TEXT,
-                selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT, highlightthickness=0, bd=0,
-                anchor="w",
-            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        option = dict(font=self.fonts.small, bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL,
+                      activeforeground=TEXT, disabledforeground=MUTED, highlightthickness=0, bd=0, anchor="w")
+        methods = tk.Frame(row, bg=PANEL)
+        methods.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        tk.Label(methods, text="METHOD", font=self.fonts.heading, bg=PANEL, fg=MUTED).pack(side="left", padx=(0, 12))
+        tk.Radiobutton(methods, text="Block other regions", value="block", variable=self.mode,
+                       command=self._show_options, **option).pack(side="left", padx=(0, 14))
+        tk.Radiobutton(methods, text="Steer: make other regions look far away", value="steer",
+                       variable=self.mode, command=self._show_options, **option).pack(side="left")
+        self.block_options = []
+        if sys.platform == "win32":
+            self.block_options.append(tk.Checkbutton(
+                row, text="Block for all apps (recommended; lets Check verify the block)",
+                variable=self.all_apps, **option))
+            self.block_options.append(tk.Checkbutton(
+                row, text="Strict: also block other regions' servers for the game (can cause \"connection lost\")",
+                variable=self.strict, **option))
+            for i, widget in enumerate(self.block_options):
+                widget.grid(row=2 + i, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._show_options()
         self._show_game()
         return row
+
+    def _show_options(self):
+        state_ = "disabled" if self.mode.get() == "steer" else "normal"
+        for widget in self.block_options:
+            widget.config(state=state_)
 
     def _build_regions(self, parent) -> tk.Frame:
         panel = tk.Frame(parent, bg=BG)
@@ -378,14 +392,17 @@ class App:
         if not self.selected:
             self.status.config(text="Click a region card first.", fg=OK)
             return
+        mode = self.mode.get()
         game = self.exe.get().strip()
         exe = "" if self.all_apps.get() else game
         strict_exe = game if sys.platform == "win32" and self.strict.get() else ""
-        if sys.platform == "win32" and not game and (not self.all_apps.get() or self.strict.get()):
+        needs_game = mode == "block" and (not self.all_apps.get() or self.strict.get())
+        if sys.platform == "win32" and not game and needs_game:
             self.status.config(text="Choose the game executable first (Change…), or untick the options that need it.", fg=OK)
             return
         code = self.selected
-        self.set_busy(True, f"Locking to {regions.get(code).name}: finding every beacon address (can take up to 30 s)…")
+        what = "measuring every region to pick a decoy" if mode == "steer" else "finding every beacon address"
+        self.set_busy(True, f"Locking to {regions.get(code).name}: {what} (can take up to 30 s)…")
 
         def done(notes):
             self.locked, self.lock_active = code, True
@@ -394,7 +411,7 @@ class App:
             self.set_busy(False, "\n".join(lines + notes), GOOD)
             self.refresh_ping()
 
-        self.background(lambda: core.lock(code, exe, strict_exe), done)
+        self.background(lambda: core.lock(code, exe, strict_exe, mode), done)
 
     def on_unlock(self):
         self.set_busy(True, "Removing lock…")
