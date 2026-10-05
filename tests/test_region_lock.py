@@ -1,11 +1,12 @@
 import socket
 import struct
 import threading
+import types
 from pathlib import Path
 
 import pytest
 
-from dbd_region_lock import core, detect, diagnose, hostsfile, regions, resolver, state
+from dbd_region_lock import awsranges, core, detect, diagnose, hostsfile, regions, resolver, state
 from dbd_region_lock.firewall import linux, windows
 
 
@@ -313,3 +314,59 @@ def test_udp_ping_survives_missing_ip_family(monkeypatch):
 
     monkeypatch.setattr(resolver.socket, "socket", no_socket)
     assert resolver.udp_ping("2a05:d014::1") is None
+
+
+def test_third_party_firewall_state_decoding():
+    # Norton with firewall on (0x061100) and another product with it off (0x060100).
+    on, off = diagnose.third_party_firewalls("397568|Norton 360 for Gamers\n393472|Other FW\ngarbage\n")
+    assert on == ["Norton 360 for Gamers"] and off == ["Other FW"]
+
+
+def test_ranges_by_region_collapses_and_keeps_families():
+    data = {
+        "prefixes": [
+            {"ip_prefix": "3.0.0.0/25", "region": "eu-central-1", "service": "AMAZON"},
+            {"ip_prefix": "3.0.0.128/25", "region": "eu-central-1", "service": "EC2"},
+            {"ip_prefix": "3.0.0.0/24", "region": "eu-central-1", "service": "EC2"},
+        ],
+        "ipv6_prefixes": [{"ipv6_prefix": "2a05:d014::/35", "region": "eu-central-1", "service": "EC2"}],
+    }
+    assert awsranges.ranges_by_region(data) == {"eu-central-1": ["3.0.0.0/24", "2a05:d014::/35"]}
+
+
+def test_strict_never_blocks_kept_or_backend_region():
+    all_ranges = {code: [f"{code}-range"] for code in ("us-east-1", "eu-central-1", "ap-south-1")}
+    keep_frankfurt = awsranges.strict_block_list("eu-central-1", list(all_ranges), all_ranges)
+    assert keep_frankfurt == {"ap-south-1": ["ap-south-1-range"]}  # us-east-1 hosts the game's backend
+    keep_virginia = awsranges.strict_block_list("us-east-1", list(all_ranges), all_ranges)
+    assert set(keep_virginia) == {"eu-central-1", "ap-south-1"}
+
+
+def test_strict_lock_adds_ranges_for_game_only(monkeypatch, env):
+    added = {}
+    env.add_ranges = lambda exe, ranges: added.update(exe=exe, ranges=ranges)
+    monkeypatch.setattr(core.resolver, "resolve_regions", lambda rs: {r.code: {"9.9.9.9"} for r in rs})
+    monkeypatch.setattr(core.awsranges, "load", lambda: {r.code: [f"{r.code}/r"] for r in regions.REGIONS})
+    notes = core.lock("us-east-1", "", strict_exe="C:\\\\dbd.exe")
+    assert added["exe"] == "C:\\\\dbd.exe" and "us-east-1" not in added["ranges"]
+    assert len(added["ranges"]) == len(regions.REGIONS) - 1
+    assert state.load().strict_exe == "C:\\\\dbd.exe"
+    assert any("Strict" in n for n in notes)
+
+
+def test_strict_download_failure_leaves_firewall_untouched(monkeypatch, env):
+    def fail():
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(core.awsranges, "load", fail)
+    with pytest.raises(RuntimeError):
+        core.lock("us-east-1", "", strict_exe="C:\\\\dbd.exe")
+    assert env.applied == {}
+
+
+def test_windows_rules_split_large_range_lists(monkeypatch):
+    calls = []
+    monkeypatch.setattr(windows, "_run", lambda args: calls.append(args) or types.SimpleNamespace(returncode=0))
+    windows.WindowsFirewall().add_ranges("C:\\\\dbd.exe", {"eu-central-1": [f"3.{i // 256}.{i % 256}.0/24" for i in range(450)]})
+    assert len(calls) == 3  # 200 + 200 + 50
+    assert all("program=C:\\\\dbd.exe" in c for c in calls)

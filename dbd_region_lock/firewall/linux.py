@@ -90,6 +90,10 @@ class LinuxFirewall:
         if result.returncode != 0:
             raise RuntimeError(f"nft failed: {result.stderr.strip()}")
 
+    def add_ranges(self, exe: str, ranges: dict[str, list[str]]) -> None:
+        # Without a per-program match, blocking whole AWS regions would break much of the web.
+        raise RuntimeError("Strict mode is only available on Windows.")
+
     def remove(self) -> None:
         subprocess.run(_privileged(["nft", "delete", "table", "inet", TABLE]), capture_output=True, text=True)
 

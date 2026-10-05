@@ -41,16 +41,34 @@ def windows_firewall_checks() -> list[Check]:
     try:
         products = _powershell(
             "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName FirewallProduct "
-            "-ErrorAction SilentlyContinue | ForEach-Object { $_.displayName }"
+            '-ErrorAction SilentlyContinue | ForEach-Object { "$($_.productState)|$($_.displayName)" }'
         )
-        if products:
-            names = ", ".join(sorted(set(products.splitlines())))
-            checks.append(Check(WARN, f"Another firewall is installed ({names}). If it manages your firewall, "
-                                      "Windows Firewall rules may be ignored: turn its firewall off or block the "
-                                      "addresses there."))
+        on, off = third_party_firewalls(products)
+        if on:
+            checks.append(Check(FAIL, f"{', '.join(on)} is running its own firewall, so Windows Firewall rules are "
+                                      "ignored. Turn its firewall off (keep its antivirus) and press Lock again."))
+        if off:
+            checks.append(Check(OK, f"{', '.join(off)} firewall is off, so Windows Firewall is in charge."))
     except (OSError, subprocess.SubprocessError):
         pass
     return checks
+
+
+def third_party_firewalls(output: str) -> tuple[list[str], list[str]]:
+    """Split Security Center firewall products into (enabled, disabled) by their productState.
+
+    productState is a 24-bit code whose middle byte says whether the product is
+    on: 0x10 (or 0x11) = enabled, 0x00 (or 0x01) = disabled.
+    """
+    on, off = [], []
+    for line in output.splitlines():
+        state, _, name = line.partition("|")
+        try:
+            enabled = (int(state) >> 8) & 0x10
+        except ValueError:
+            continue
+        (on if enabled else off).append(name.strip())
+    return sorted(set(on)), sorted(set(off))
 
 
 def dns_checks(kept: str | None) -> list[Check]:
@@ -98,6 +116,12 @@ def lock_checks(kept: str, saved: state.LockState | None) -> list[Check]:
                                       "Close the game and press Lock again."))
         else:
             checks.append(Check(OK, "Every beacon address of the other regions is in the block list."))
+
+    if saved and saved.strict_exe:
+        checks.append(Check(OK, "Strict is on: every other region's Amazon servers are blocked for the game "
+                                "(N. Virginia always stays open, because the game's login servers are there)."))
+    elif sys.platform == "win32":
+        checks.append(Check(INFO, "Strict is off. If you still land in other regions, tick Strict and press Lock again."))
 
     all_apps = saved is not None and not saved.exe
     if all_apps or sys.platform != "win32":

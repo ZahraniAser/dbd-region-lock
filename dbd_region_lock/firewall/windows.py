@@ -47,14 +47,23 @@ def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, creationflags=flags)
 
 
-def _add_rule(region_code: str, exe: str, ips: set[str]) -> None:
-    # Windows Firewall occasionally fails with a transient "error (0x2)"; retry a few times.
-    for _ in range(3):
-        result = _run(add_rule_args(region_code, exe, ips))
-        if result.returncode == 0:
-            return
-        time.sleep(0.3)
-    raise RuntimeError(f"netsh failed for {region_code}: {result.stdout.strip() or result.stderr.strip()}")
+# Keeps each netsh command well under Windows' command-line length limit.
+MAX_ADDRESSES_PER_RULE = 200
+
+
+def _add_rule(region_code: str, exe: str, addresses) -> None:
+    """Add block rules for `addresses` (IPs or CIDR ranges), split into several rules if needed."""
+    addresses = sorted(addresses)
+    for start in range(0, len(addresses), MAX_ADDRESSES_PER_RULE):
+        chunk = set(addresses[start:start + MAX_ADDRESSES_PER_RULE])
+        # Windows Firewall occasionally fails with a transient "error (0x2)"; retry a few times.
+        for _ in range(3):
+            result = _run(add_rule_args(region_code, exe, chunk))
+            if result.returncode == 0:
+                break
+            time.sleep(0.3)
+        else:
+            raise RuntimeError(f"netsh failed for {region_code}: {result.stdout.strip() or result.stderr.strip()}")
 
 
 class WindowsFirewall:
@@ -85,6 +94,12 @@ class WindowsFirewall:
         for code, ips in blocked.items():
             if ips:
                 _add_rule(code, exe, ips)
+
+    def add_ranges(self, exe: str, ranges: dict[str, list[str]]) -> None:
+        """Strict mode: block whole address ranges, only for the game's executable."""
+        for code, cidrs in ranges.items():
+            if cidrs:
+                _add_rule(code, exe, cidrs)
 
     def remove(self) -> None:
         # netsh exits non-zero when no rule matches; that is fine here. Deleting by

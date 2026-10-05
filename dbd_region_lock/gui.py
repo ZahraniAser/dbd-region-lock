@@ -137,6 +137,8 @@ class App:
         # app verify the block); keep the game-only choice from an earlier lock.
         saved = state.load()
         self.all_apps = tk.BooleanVar(value=not (saved and saved.exe))
+        # Strict blocks whole regions for the game; on by default whenever the game was found.
+        self.strict = tk.BooleanVar(value=bool(saved.strict_exe) if saved else bool(self.exe.get()))
 
         root.title(f"{TITLE} {__version__}")
         root.configure(bg=BG)
@@ -194,6 +196,12 @@ class App:
                 selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT, highlightthickness=0, bd=0,
                 anchor="w",
             ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            tk.Checkbutton(
+                row, text="Strict: also block every other region's Amazon servers for the game (needs the game path)",
+                variable=self.strict, font=self.fonts.small, bg=PANEL, fg=TEXT,
+                selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT, highlightthickness=0, bd=0,
+                anchor="w",
+            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self._show_game()
         return row
 
@@ -370,9 +378,11 @@ class App:
         if not self.selected:
             self.status.config(text="Click a region card first.", fg=OK)
             return
-        exe = "" if self.all_apps.get() else self.exe.get().strip()
-        if sys.platform == "win32" and not self.all_apps.get() and not exe:
-            self.status.config(text="Choose the game executable first (Change…), or tick 'Block for all apps'.", fg=OK)
+        game = self.exe.get().strip()
+        exe = "" if self.all_apps.get() else game
+        strict_exe = game if sys.platform == "win32" and self.strict.get() else ""
+        if sys.platform == "win32" and not game and (not self.all_apps.get() or self.strict.get()):
+            self.status.config(text="Choose the game executable first (Change…), or untick the options that need it.", fg=OK)
             return
         code = self.selected
         self.set_busy(True, f"Locking to {regions.get(code).name}: finding every beacon address (can take up to 30 s)…")
@@ -384,7 +394,7 @@ class App:
             self.set_busy(False, "\n".join(lines + notes), GOOD)
             self.refresh_ping()
 
-        self.background(lambda: core.lock(code, exe), done)
+        self.background(lambda: core.lock(code, exe, strict_exe), done)
 
     def on_unlock(self):
         self.set_busy(True, "Removing lock…")

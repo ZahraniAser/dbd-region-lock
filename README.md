@@ -21,6 +21,16 @@ region **except** the one you choose and adds firewall rules that block them:
 | Windows | Windows Defender Firewall outbound rules, one per blocked region, named `DBD Region Lock - <region>` | All apps by default (beacon IPs serve nothing but GameLift pings), or only the DBD executable if you untick **Block for all apps**. Rules persist across reboots. |
 | Linux / Proton | An nftables table `inet dbd_region_lock` | System-wide, but only for GameLift beacon IPs, which serve nothing else. Cleared on reboot. |
 
+**Strict mode (Windows, on by default when the game is found).** Blocking the
+beacons isn't always enough: the game can still reach other regions by other
+routes. Strict also blocks every Amazon address range of the other regions
+(from AWS's published `ip-ranges.json`, about 3,300 ranges) for the game's
+.exe only, so it can't measure or connect to them at all. N. Virginia
+(us-east-1) is never range-blocked, because the game's login and matchmaking
+servers (`*.live.bhvrdbd.com`) run there; its beacons are still blocked when you
+lock elsewhere. If the game can't log in with Strict on, untick it and lock
+again.
+
 The app never touches the game process, its memory or its files. It only adds
 firewall rules, which is the same thing as a user editing their own firewall.
 
@@ -44,7 +54,8 @@ Safeguards:
   Lock and Unlock remove them (a backup is saved as
   `hosts.dbd-region-lock.bak`) and flush the DNS cache.
 - **Check button.** Tests the things that make a lock fail: Windows Firewall
-  turned off, a third-party firewall (Norton, Bitdefender…) taking over,
+  turned off, a third-party firewall (Norton, Bitdefender…) taking over (it
+  reads whether that firewall is actually on),
   missing addresses, DNS blockers such as Acrylic DNS Proxy, leftover hosts
   entries, and a live test that every other region is really unreachable.
   **Copy report** puts the result on the clipboard.
@@ -77,7 +88,7 @@ push (see `.github/workflows/build.yml`).
    (or `WinGDK` for the Microsoft Store version).
 2. Click a region card. Pings are colour-coded (green < 80 ms, yellow < 150 ms,
    red above). **Pick best ping** selects the fastest one for you.
-3. Keep **Block for all apps** ticked (recommended). Press **LOCK TO …**;
+3. Keep **Block for all apps** and **Strict** ticked (recommended). Press **LOCK TO …**;
    finding every beacon address takes up to ~30 s. The badge top-right turns
    red, the chosen card shows **● LOCKED** and every other card shows
    **BLOCKED**. If any other card still shows a ping, the block is not

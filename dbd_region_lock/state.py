@@ -25,14 +25,16 @@ def state_path() -> Path:
 @dataclass
 class LockState:
     region: str
-    exe: str = ""
+    exe: str = ""  # beacon rules apply to this program; "" = every program
     blocked_ips: set[str] = field(default_factory=set)
+    strict_exe: str = ""  # Strict mode: whole regions blocked for this program; "" = off
 
 
 def load(path: Path | None = None) -> LockState | None:
     try:
         data = json.loads((path or state_path()).read_text(encoding="utf-8"))
-        return LockState(data["region"], data.get("exe", ""), set(data.get("blocked_ips", [])))
+        return LockState(data["region"], data.get("exe", ""), set(data.get("blocked_ips", [])),
+                         data.get("strict_exe", ""))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -40,7 +42,8 @@ def load(path: Path | None = None) -> LockState | None:
 def save(state: LockState, path: Path | None = None) -> None:
     path = path or state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"region": state.region, "exe": state.exe, "blocked_ips": sorted(state.blocked_ips)}
+    data = {"region": state.region, "exe": state.exe, "blocked_ips": sorted(state.blocked_ips),
+            "strict_exe": state.strict_exe}
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 

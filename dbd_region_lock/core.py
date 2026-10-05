@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from . import detect, hostsfile, regions, resolver, state
+from . import awsranges, detect, hostsfile, regions, resolver, state
 from .firewall import get_firewall
 
 
@@ -43,13 +43,28 @@ def _block_lists(region_code: str) -> dict[str, set[str]]:
     return {code: region_ips - keep_ips for code, region_ips in ips.items()}
 
 
-def _lock(region_code: str, exe: str) -> list[str]:
-    """Block every region except `region_code` for `exe`. Returns notes and warnings."""
+def _lock(region_code: str, exe: str, strict_exe: str = "") -> list[str]:
+    """Block every region's ping beacons except `region_code`. Returns notes and warnings.
+
+    Beacon rules apply to `exe` ("" = every program). With `strict_exe`, every
+    Amazon address range of the other regions is also blocked for that program,
+    so the game can't reach them by any route.
+    """
     _require_game_closed()
+    regions.get(region_code)
+    # Fetch the ranges before touching the firewall, so a download failure leaves the old lock intact.
+    ranges = None
+    if strict_exe:
+        ranges = awsranges.strict_block_list(region_code, [r.code for r in regions.REGIONS], awsranges.load())
     notes = _clean_hosts()
     ips = _block_lists(region_code)
-    notes += get_firewall().apply(exe, ips)
-    state.save(state.LockState(region_code, exe, set().union(*ips.values())))
+    firewall = get_firewall()
+    notes += firewall.apply(exe, ips)
+    if ranges:
+        firewall.add_ranges(strict_exe, ranges)
+        count = sum(len(r) for r in ranges.values())
+        notes.append(f"Strict: {count} Amazon address ranges of the other regions are blocked for the game.")
+    state.save(state.LockState(region_code, exe, set().union(*ips.values()), strict_exe))
     return notes
 
 
@@ -95,9 +110,9 @@ def locked_region(blocked: list[str]) -> str | None:
     return kept[0] if blocked and len(kept) == 1 else None
 
 
-def lock(region_code: str, exe: str) -> list[str]:
+def lock(region_code: str, exe: str, strict_exe: str = "") -> list[str]:
     with _firewall_lock:
-        return _lock(region_code, exe)
+        return _lock(region_code, exe, strict_exe)
 
 
 def unlock() -> list[str]:
