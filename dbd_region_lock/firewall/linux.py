@@ -41,6 +41,18 @@ def ruleset(blocked: dict[str, set[str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def add_elements(blocked: dict[str, set[str]]) -> str:
+    """nft commands that add IPs to the existing sets."""
+    v4 = sorted(ip for ips in blocked.values() for ip in ips if ipaddress.ip_address(ip).version == 4)
+    v6 = sorted(ip for ips in blocked.values() for ip in ips if ipaddress.ip_address(ip).version == 6)
+    lines = []
+    if v4:
+        lines.append(f"add element inet {TABLE} blocked4 {{ {', '.join(v4)} }}")
+    if v6:
+        lines.append(f"add element inet {TABLE} blocked6 {{ {', '.join(v6)} }}")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
 def _privileged(args: list[str]) -> list[str]:
     if os.geteuid() == 0:
         return args
@@ -65,6 +77,18 @@ class LinuxFirewall:
         if result.returncode != 0:
             raise RuntimeError(f"nft failed: {result.stderr.strip()}")
         return warnings
+
+    def can_refresh(self) -> bool:
+        # Each nft call outside root would pop a password prompt, so only refresh silently as root.
+        return os.geteuid() == 0
+
+    def add(self, exe: str, blocked: dict[str, set[str]]) -> None:
+        script = add_elements(blocked)
+        if not script:
+            return
+        result = subprocess.run(_privileged(["nft", "-f", "-"]), input=script, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"nft failed: {result.stderr.strip()}")
 
     def remove(self) -> None:
         subprocess.run(_privileged(["nft", "delete", "table", "inet", TABLE]), capture_output=True, text=True)

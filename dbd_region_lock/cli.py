@@ -34,24 +34,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{r.code:<16} {r.name:<28} {f'{ms:.0f} ms' if ms is not None else 'unreachable'}")
         return 0
 
-    if args.command == "lock":
-        exe = args.exe or detect.find_dbd_exe()
-        if not exe and sys.platform == "win32":
-            print("Could not find Dead by Daylight. Pass --exe <path to DeadByDaylight-*-Shipping.exe>.")
-            return 1
-        for warning in core.lock(args.region, str(exe or "")):
-            print(f"warning: {warning}")
-        print(f"Locked to {args.region}. Restart the game if it is running.")
-        return 0
+    try:
+        if args.command == "lock":
+            exe = args.exe or detect.find_dbd_exe()
+            if not exe and sys.platform == "win32":
+                print("Could not find Dead by Daylight. Pass --exe <path to DeadByDaylight-*-Shipping.exe>.")
+                return 1
+            for note in core.lock(args.region, str(exe or "")):
+                print(note)
+            print(f"Locked to {args.region}. Launch the game now.")
+            return 0
 
-    if args.command == "unlock":
-        core.unlock()
-        print("Lock removed. All regions are reachable again.")
-        return 0
+        if args.command == "unlock":
+            for note in core.unlock():
+                print(note)
+            print("Lock removed. All regions are reachable again.")
+            return 0
+    except core.GameRunningError as exc:
+        print(exc)
+        return 1
 
     if args.command == "status":
-        blocked = core.status()
-        print(f"Blocked: {', '.join(blocked)}" if blocked else "Not locked.")
+        active, region = core.status()
+        print(("Locked to " + region) if region else ("Locked." if active else "Not locked."))
         return 0
 
     return 1

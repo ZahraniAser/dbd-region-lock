@@ -29,6 +29,8 @@ PING_GOOD = 80
 PING_OK = 150
 CARD_COLUMNS = 3
 TITLE = "DBD Region Lock"
+GAME_CHECK_MS = 3000  # how often to look for a running game
+REFRESH_MS = 60_000  # how often to block beacon IPs that rotated in
 
 
 def ping_colour(ms: float | None) -> str:
@@ -124,6 +126,8 @@ class App:
         self.selected: str | None = None
         self.locked: str | None = None  # the one region left open, when known
         self.lock_active = False  # any lock rules present
+        self.game_running = False
+        self.busy_now = False
         self.pings: dict[str, float | None] = {}
         self.exe = tk.StringVar(value=str(detect.find_dbd_exe() or ""))
 
@@ -143,9 +147,17 @@ class App:
         root.update_idletasks()
         root.minsize(max(720, root.winfo_reqwidth()), root.winfo_reqheight())
 
+        self.game_banner = tk.Label(
+            outer, text="Dead by Daylight is running. Close it to change region (changing mid-game can flag Easy Anti-Cheat).",
+            font=self.fonts.heading, bg=OK, fg=BG, padx=12, pady=8, anchor="w", justify="left", wraplength=680,
+        )
+        self.banner_row = 4
+
         self.refresh_ping()
         self.set_busy(True, "Checking firewall rules…")
         self.background(core.status, self.on_status)
+        self.root.after(0, self.watch_game)
+        self.root.after(REFRESH_MS, self.refresh_lock)
 
     # Layout --------------------------------------------------------------
 
@@ -227,7 +239,7 @@ class App:
             self.pill.config(text="UNLOCKED", bg=CARD, fg=GOOD)
 
     def select(self, code: str):
-        if self.lock_btn["state"] == "disabled":
+        if self.busy_now:
             return
         self.selected = code
         for c, card in self.cards.items():
@@ -235,19 +247,25 @@ class App:
         self.lock_btn.config(text=f"LOCK TO {regions.get(code).city.upper()}")
 
     def set_busy(self, on: bool, message: str | None = None, colour: str = MUTED):
-        for btn in (self.lock_btn, self.unlock_btn, self.best_btn):
-            btn.config(state="disabled" if on else "normal")
+        self.busy_now = on
+        self._update_buttons()
         if message is not None:
             self.status.config(text=message, fg=colour)
 
-    def background(self, work, done):
-        """Run `work` off the UI thread, then `done(result)` on it; errors are shown, not swallowed."""
+    def _update_buttons(self):
+        changes_blocked = self.busy_now or self.game_running
+        for btn in (self.lock_btn, self.unlock_btn):
+            btn.config(state="disabled" if changes_blocked else "normal")
+        self.best_btn.config(state="disabled" if self.busy_now else "normal")
+
+    def background(self, work, done, failed=None):
+        """Run `work` off the UI thread, then `done(result)` on it; errors go to `failed` or are shown."""
 
         def runner():
             try:
                 result = work()
             except Exception as exc:
-                self.root.after(0, self.on_error, exc)
+                self.root.after(0, failed or self.on_error, exc)
                 return
             self.root.after(0, done, result)
 
@@ -259,12 +277,11 @@ class App:
         self.set_busy(False, f"Error: {exc}", BAD)
         messagebox.showerror(TITLE, str(exc))
 
-    def on_status(self, blocked: list[str]):
-        self.lock_active = bool(blocked)
-        self.locked = core.locked_region(blocked)
+    def on_status(self, result: tuple[bool, str | None]):
+        self.lock_active, self.locked = result
         self._show_lock()
-        self.set_busy(False, "Locked. Pick another region to switch, or Unlock all." if blocked
-                      else "Pick a region, then press Lock.")
+        self.set_busy(False, "Locked. Pick another region to switch, or Unlock all." if self.lock_active
+                      else "Close the game, pick a region, press Lock, then launch the game.")
         if self.locked:
             self.select(self.locked)
 
@@ -296,6 +313,40 @@ class App:
             return
         self.select(min(measured, key=measured.get))
 
+    def watch_game(self):
+        """Poll for a running game and block region changes while it runs."""
+
+        def done(running: bool):
+            if running != self.game_running:
+                self.game_running = running
+                if running:
+                    self.game_banner.grid(row=self.banner_row, column=0, sticky="ew", pady=(12, 0))
+                else:
+                    self.game_banner.grid_remove()
+                self._update_buttons()
+            self.root.after(GAME_CHECK_MS, self.watch_game)
+
+        def failed(_exc):
+            self.root.after(GAME_CHECK_MS, self.watch_game)
+
+        self.background(detect.game_running, done, failed)
+
+    def refresh_lock(self):
+        """Every minute, block beacon IPs that rotated in (never while the game runs)."""
+
+        def done(added: int):
+            if added:
+                self.status.config(text=f"Lock refreshed: blocked {added} new beacon address(es).", fg=MUTED)
+            self.root.after(REFRESH_MS, self.refresh_lock)
+
+        def failed(_exc):
+            self.root.after(REFRESH_MS, self.refresh_lock)
+
+        if self.lock_active and not self.game_running and not self.busy_now:
+            self.background(core.refresh, done, failed)
+        else:
+            self.root.after(REFRESH_MS, self.refresh_lock)
+
     def on_lock(self):
         if not self.selected:
             self.status.config(text="Click a region card first.", fg=OK)
@@ -307,35 +358,23 @@ class App:
         code = self.selected
         self.set_busy(True, f"Locking to {regions.get(code).name}…")
 
-        def done(result):
-            warnings, running = result
+        def done(notes):
             self.locked, self.lock_active = code, True
             self._show_lock()
-            lines = [f"Locked to {regions.get(code).name}. You will only match in this region."]
-            if running:
-                lines.append("The game is running: restart it for the lock to take effect.")
-            lines += warnings
-            self.set_busy(False, "\n".join(lines), GOOD)
+            lines = [f"Locked to {regions.get(code).name}. Launch the game; you will only match in this region."]
+            self.set_busy(False, "\n".join(lines + notes), GOOD)
 
-        self.background(lambda: (core.lock(code, exe), core.game_running(exe)), done)
+        self.background(lambda: core.lock(code, exe), done)
 
     def on_unlock(self):
         self.set_busy(True, "Removing lock…")
-        exe = self.exe.get()
 
-        def work():
-            core.unlock()
-            return core.game_running(exe)
-
-        def done(running):
+        def done(notes):
             self.locked, self.lock_active = None, False
             self._show_lock()
-            msg = "Unlocked. The game can use every region again."
-            if running:
-                msg += " Restart the game for this to take effect."
-            self.set_busy(False, msg, GOOD)
+            self.set_busy(False, "\n".join(["Unlocked. The game can use every region again."] + notes), GOOD)
 
-        self.background(work, done)
+        self.background(core.unlock, done)
 
 
 def icon_path() -> Path:

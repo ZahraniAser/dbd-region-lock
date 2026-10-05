@@ -76,3 +76,35 @@ def find_dbd_exe() -> Path | None:
         if exe:
             return exe
     return None
+
+
+def _windows_process_names() -> set[str]:
+    import subprocess
+
+    result = subprocess.run(
+        ["tasklist", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    return {line.split('","')[0].strip('"').lower() for line in result.stdout.splitlines() if line}
+
+
+def _linux_cmdlines() -> list[str]:
+    # Under Proton the game runs inside Wine, so look for the .exe name in command lines.
+    out = []
+    for proc in Path("/proc").iterdir():
+        if proc.name.isdigit():
+            try:
+                out.append((proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore"))
+            except OSError:
+                continue
+    return out
+
+
+def game_running() -> bool:
+    """True if any Dead by Daylight build (Steam, Epic, Microsoft Store) is running."""
+    names = {exe.lower() for exe in SHIPPING_EXES}
+    if sys.platform == "win32":
+        return bool(names & _windows_process_names())
+    if sys.platform.startswith("linux"):
+        return any(name in cmd.lower() for cmd in _linux_cmdlines() for name in names)
+    return False

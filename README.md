@@ -1,9 +1,13 @@
 # DBD Region Lock
 
-Small desktop app that locks Dead by Daylight to the AWS region you pick. It
-firewall-blocks the ping beacons of every other region, scoped to the DBD
-executable, so the game can only measure and match into the one you chose.
-Windows and Linux (Proton works).
+Pick the Dead by Daylight server region you want to play in. The app uses your
+own firewall to stop the game from reaching every other region's latency
+beacon, so matchmaking only ever sees the region you picked. Built for Windows;
+also works on Linux with Steam Proton.
+
+> **Always close Dead by Daylight before locking or unlocking, then launch it.**
+> The app refuses to change anything while the game is running, because
+> changing firewall rules mid-game can flag Easy Anti-Cheat.
 
 ## How it works
 
@@ -19,6 +23,23 @@ region **except** the one you choose and adds firewall rules that block them:
 
 The app never touches the game process, its memory or its files. It only adds
 firewall rules, which is the same thing as a user editing their own firewall.
+
+Safeguards:
+
+- **Game must be closed.** Lock and Unlock are disabled while any DBD build
+  (Steam, Epic, Microsoft Store, or Proton) is running, and a yellow banner
+  says so.
+- **Auto-refresh.** Beacon addresses rotate. While the app is open and the game
+  is closed, it re-checks every 60 seconds and blocks any new addresses. It
+  only ever adds rules, so the lock is never lifted. (On Linux this runs only
+  when the app runs as root, to avoid repeated password prompts.)
+- **Hosts-file cleanup.** Old hosts-file region changers leave `gamelift`
+  entries in `C:\Windows\System32\drivers\etc\hosts` that fight the lock.
+  Lock and Unlock remove them (a backup is saved as
+  `hosts.dbd-region-lock.bak`) and flush the DNS cache.
+- **Real ping.** Latency is measured the way the game does it: a UDP echo to
+  each beacon on port 7770. If your network drops that, it falls back to a TCP
+  handshake so you still see a number.
 
 ## Windows: run it right away
 
@@ -78,8 +99,11 @@ python -m dbd_region_lock status
   selectors that work this way are widely used. That said, no third-party
   tool can guarantee how Behaviour Interactive treats it, so use at your own
   discretion.
-- Beacon DNS answers can change over time. If a blocked region starts
-  appearing again, click **Lock** again to refresh the IPs.
+- Beacon addresses can change over time. The app refreshes the block every
+  minute while it is open; if you lock and close the app, open it again (or
+  press **Lock** again) before playing if a blocked region shows up.
+- If you used a DNS-proxy method (such as Acrylic DNS Proxy) before, undo it
+  first: it changes what the beacons resolve to.
 - Locking to a far-away region means high ping in matches, and queues can be
   longer in small regions.
 - Locking does not change the region of a lobby you are already in; restart

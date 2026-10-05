@@ -36,13 +36,45 @@ def resolve_regions(regions: list[Region]) -> dict[str, set[str]]:
     return out
 
 
-def measure_latency(region: Region, timeout: float = 2.0) -> float | None:
-    """Round-trip time in ms of a TCP handshake to the region's beacon, or None."""
-    host = region.beacon_hosts[0]
+BEACON_PORT = 7770  # GameLift ping beacons echo any UDP payload sent here
+
+
+def udp_ping(ip: str, port: int = BEACON_PORT, timeout: float = 2.5) -> float | None:
+    """Round-trip ms of a UDP echo from a GameLift beacon (what the game itself measures), or None."""
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.connect((ip, port))
+            start = time.perf_counter()
+            sock.send(b"ping")
+            sock.recv(512)
+        except OSError:
+            return None
+    return (time.perf_counter() - start) * 1000
+
+
+def tcp_ping(host: str, port: int = 443, timeout: float = 2.0) -> float | None:
+    """Round-trip ms of a TCP handshake, or None."""
     start = time.perf_counter()
     try:
-        with socket.create_connection((host, 443), timeout=timeout):
+        with socket.create_connection((host, port), timeout=timeout):
             pass
     except OSError:
         return None
     return (time.perf_counter() - start) * 1000
+
+
+def measure_latency(region: Region) -> float | None:
+    """Ping the region's beacon over UDP 7770 like the game does.
+
+    Falls back to a TCP handshake with the region's GameLift endpoint when UDP
+    gets no answer (some networks drop it), so the app still shows a number.
+    """
+    beacon = region.beacon_hosts[1]
+    try:
+        ip = socket.getaddrinfo(beacon, BEACON_PORT, socket.AF_INET, socket.SOCK_DGRAM)[0][4][0]
+    except (socket.gaierror, IndexError):
+        ip = None
+    ms = udp_ping(ip) if ip else None
+    return ms if ms is not None else tcp_ping(region.beacon_hosts[0])

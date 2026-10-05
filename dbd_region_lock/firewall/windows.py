@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 from ..regions import REGIONS
 
@@ -42,6 +43,16 @@ def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, creationflags=flags)
 
 
+def _add_rule(region_code: str, exe: str, ips: set[str]) -> None:
+    # Windows Firewall occasionally fails with a transient "error (0x2)"; retry a few times.
+    for _ in range(3):
+        result = _run(add_rule_args(region_code, exe, ips))
+        if result.returncode == 0:
+            return
+        time.sleep(0.3)
+    raise RuntimeError(f"netsh failed for {region_code}: {result.stdout.strip() or result.stderr.strip()}")
+
+
 class WindowsFirewall:
     def is_admin(self) -> bool:
         try:
@@ -59,13 +70,21 @@ class WindowsFirewall:
             if not ips:
                 warnings.append(f"{code}: no beacon IPs resolved, region left unblocked")
                 continue
-            result = _run(add_rule_args(code, exe, ips))
-            if result.returncode != 0:
-                raise RuntimeError(f"netsh failed for {code}: {result.stdout.strip() or result.stderr.strip()}")
+            _add_rule(code, exe, ips)
         return warnings
 
+    def can_refresh(self) -> bool:
+        return True
+
+    def add(self, exe: str, blocked: dict[str, set[str]]) -> None:
+        """Add rules for more IPs without touching existing ones, so the block never lapses."""
+        for code, ips in blocked.items():
+            if ips:
+                _add_rule(code, exe, ips)
+
     def remove(self) -> None:
-        # netsh exits non-zero when no rule matches; that is fine here.
+        # netsh exits non-zero when no rule matches; that is fine here. Deleting by
+        # name removes every rule with that name, including ones added by add().
         for region in REGIONS:
             _run(delete_rule_args(region.code))
 
